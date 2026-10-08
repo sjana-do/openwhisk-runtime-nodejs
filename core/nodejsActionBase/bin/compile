@@ -26,11 +26,8 @@ def sources(launcher, source_dir, main):
     # or if we have just one but that isn't exec.
     num_files = len([name for name in os.listdir(source_dir) if os.path.isfile("%s/%s" % (source_dir, name))])
     if num_files == 1 and os.path.isfile("%s/exec" % source_dir):
-        main_file = "main"
-        main_func = main
-
         # If we only upload a single file, it'll be called 'exec' which we need the launcher
-        # script to be.
+        # script to be. Wrap into main.js (CJS) and point MAIN_SPEC at main.<func>.
         src = "%s/exec" % source_dir
         dst = "%s/main.js" % source_dir
         body = ""
@@ -48,38 +45,37 @@ def sources(launcher, source_dir, main):
     }
 })()''' % {"code": body, "main": main}
             d.write(func)
+        # launcher resolves file.func → main.js + export <main>
+        main_spec = "main.%s" % main
     else:
         # main can be either
         #  file.func
         #  func
         #
         # If only 1 part is defined, Node.js will infer the file to either be index.js or
-        # part of package.json.
+        # part of package.json (resolved in launcher.js, matching runner.js).
         parts = main.split(".", 1)
         if len(parts) == 1:
             if not os.path.isfile("%s/index.js" % source_dir) and not os.path.isfile("%s/index.mjs" % source_dir) and not os.path.isfile("%s/package.json" % source_dir):
                 print("Zipped functions must contain either package.json or index.[m]js at the root.")
                 sys.exit(1)
 
-            main_file = ""
-            main_func = parts[0]
-        else:
-            main_file = parts[0]
-            main_func = parts[1]
+        main_spec = main
 
-    # Write the launcher file to the current source dir
-    launcher_file = "%s/exec__.js" % source_dir
+    # Write the launcher as .cjs so it stays CommonJS even when the user's
+    # package.json has "type": "module" (SERVERLESS-3979).
+    launcher_file = "%s/exec__.cjs" % source_dir
     with codecs.open(launcher_file, 'w', 'utf-8') as d:
         with codecs.open(launcher, 'r', 'utf-8') as s:
             body = s.read()
-            body = body.replace('require("./##MAIN_FILE##").##MAIN_FUNC##', 'require("./%s").%s' % (main_file, main_func))
+            body = body.replace("'##MAIN##'", "'%s'" % main_spec)
             d.write(body)
 
 def build(source_dir, target_file):
     with codecs.open(target_file, 'w', 'utf-8') as d:
         d.write("""#!/bin/bash
 cd %s
-exec node exec__.js
+exec node exec__.cjs
 """ % source_dir)
     os.chmod(target_file, 0o755)
 
@@ -91,7 +87,7 @@ def main(argv):
     main = argv[1]
     source_dir = os.path.abspath(argv[2])
     target_file = os.path.abspath("%s/exec" % argv[3])
-    launcher = "/nodejsAction/launcher.js"
+    launcher = os.environ.get("OW_NODE_LAUNCHER", "/nodejsAction/launcher.js")
     sources(launcher, source_dir, main)
     build(source_dir, target_file)
 
